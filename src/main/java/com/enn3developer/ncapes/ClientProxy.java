@@ -10,6 +10,7 @@ import net.minecraftforge.common.MinecraftForge;
 import org.lwjgl.input.Keyboard;
 
 import com.enn3developer.ncapes.client.ClientCapeManager;
+import com.enn3developer.ncapes.client.ClientKeybinds;
 import com.enn3developer.ncapes.client.ClientNetworkCompatibility;
 import com.enn3developer.ncapes.client.gui.CapeUploadScreen;
 import com.enn3developer.ncapes.network.CapeNetwork;
@@ -45,8 +46,12 @@ public class ClientProxy extends CommonProxy {
         FMLCommonHandler.instance()
             .bus()
             .register(this);
+        if (!Loader.isModLoaded("controlling")) {
+            throw new IllegalStateException("NCapes requires Controlling 2.1.7 or newer on the client");
+        }
         openCapeScreen = new KeyBinding("key.ncapes.open", Keyboard.KEY_K, "key.categories.ncapes");
         ClientRegistry.registerKeyBinding(openCapeScreen);
+        ClientKeybinds.useControllingDefault(openCapeScreen);
     }
 
     @Override

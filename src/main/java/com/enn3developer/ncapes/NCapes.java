@@ -15,7 +15,7 @@ import cpw.mods.fml.common.event.FMLPreInitializationEvent;
     name = NCapes.NAME,
     acceptedMinecraftVersions = "[1.7.10]",
     acceptableRemoteVersions = "*",
-    dependencies = "after:modularui2@[2.3.91-1.7.10,)")
+    dependencies = "after:modularui2@[2.3.91-1.7.10,);after:controlling@[2.1.7,)")
 public class NCapes {
 
     public static final String MODID = "ncapes";

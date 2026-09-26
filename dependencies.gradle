@@ -35,6 +35,7 @@
  */
 dependencies {
     devOnlyNonPublishable("com.github.GTNewHorizons:ModularUI2:2.3.91-1.7.10:dev")
+    devOnlyNonPublishable("com.github.GTNewHorizons:Controlling:2.1.10:dev")
     compileOnly("org.lwjgl:lwjgl:3.4.2-20260213.173042-1") { transitive = false }
     compileOnly("org.lwjgl:lwjgl-sdl:3.4.2-20260213.173042-1") { transitive = false }
 }
