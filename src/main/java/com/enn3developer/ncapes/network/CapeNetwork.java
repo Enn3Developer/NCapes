@@ -47,6 +47,7 @@ public final class CapeNetwork {
         created.registerMessage(CapeDataHandler.class, CapeDataPacket.class, 2, Side.CLIENT);
         created.registerMessage(CapeRemovedHandler.class, CapeRemovedPacket.class, 3, Side.CLIENT);
         created.registerMessage(UploadResultHandler.class, UploadResultPacket.class, 4, Side.CLIENT);
+        created.registerMessage(RequestCapeHandler.class, RequestCapePacket.class, 5, Side.SERVER);
         FMLCommonHandler.instance()
             .bus()
             .register(new PeerRegistrationHandler());
@@ -89,6 +90,17 @@ public final class CapeNetwork {
         }
         init();
         channel.sendToServer(new ClearPacket(requestId));
+    }
+
+    public static void requestCape(UUID playerId) {
+        if (playerId == null) {
+            throw new IllegalArgumentException("Cape player ID is required");
+        }
+        if (!isServerAvailable()) {
+            throw new IllegalStateException("This server does not support NCapes");
+        }
+        init();
+        channel.sendToServer(new RequestCapePacket(playerId));
     }
 
     /** Whether the current connection's server registered the NCapes packet channel. */
@@ -248,6 +260,29 @@ public final class CapeNetwork {
         }
     }
 
+    public static final class RequestCapePacket implements IMessage {
+
+        private UUID playerId;
+
+        public RequestCapePacket() {}
+
+        private RequestCapePacket(UUID playerId) {
+            this.playerId = playerId;
+        }
+
+        @Override
+        public void fromBytes(ByteBuf buffer) {
+            if (buffer.readableBytes() == 16) {
+                playerId = readPlayerId(buffer);
+            }
+        }
+
+        @Override
+        public void toBytes(ByteBuf buffer) {
+            writePlayerId(buffer, playerId);
+        }
+    }
+
     public static final class CapeDataPacket implements IMessage {
 
         private UUID playerId;
@@ -360,12 +395,28 @@ public final class CapeNetwork {
         }
     }
 
+    public static final class RequestCapeHandler implements IMessageHandler<RequestCapePacket, IMessage> {
+
+        @Override
+        public IMessage onMessage(RequestCapePacket packet, MessageContext context) {
+            EntityPlayerMP sender = context.getServerHandler().playerEntity;
+            if (sender != null && packet.playerId != null) {
+                CapeServerEvents.enqueueCapeRequest(sender, packet.playerId);
+            }
+            return null;
+        }
+    }
+
     public static final class CapeDataHandler implements IMessageHandler<CapeDataPacket, IMessage> {
 
         @Override
         public IMessage onMessage(CapeDataPacket packet, MessageContext context) {
             if (packet.playerId != null && packet.pngBytes != null) {
-                NCapes.proxy.onCapeData(packet.playerId, packet.pngBytes);
+                NCapes.proxy.onCapeData(
+                    context.getClientHandler()
+                        .getNetworkManager(),
+                    packet.playerId,
+                    packet.pngBytes);
             }
             return null;
         }
@@ -376,7 +427,10 @@ public final class CapeNetwork {
         @Override
         public IMessage onMessage(CapeRemovedPacket packet, MessageContext context) {
             if (packet.playerId != null) {
-                NCapes.proxy.onCapeRemoved(packet.playerId);
+                NCapes.proxy.onCapeRemoved(
+                    context.getClientHandler()
+                        .getNetworkManager(),
+                    packet.playerId);
             }
             return null;
         }

@@ -2,6 +2,8 @@ package com.enn3developer.ncapes;
 
 import java.util.UUID;
 
+import net.minecraft.network.NetworkManager;
+
 import com.enn3developer.ncapes.network.CapeNetwork;
 import com.enn3developer.ncapes.server.CapeServerEvents;
 
@@ -20,9 +22,9 @@ public class CommonProxy {
 
     public void postInit(FMLPostInitializationEvent event) {}
 
-    public void onCapeData(UUID playerId, byte[] pngBytes) {}
+    public void onCapeData(NetworkManager source, UUID playerId, byte[] pngBytes) {}
 
-    public void onCapeRemoved(UUID playerId) {}
+    public void onCapeRemoved(NetworkManager source, UUID playerId) {}
 
     public void onCapeUploadResult(long requestId, boolean success, String message) {}
 }

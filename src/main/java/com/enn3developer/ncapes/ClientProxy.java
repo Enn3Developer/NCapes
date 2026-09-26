@@ -4,6 +4,7 @@ import java.util.UUID;
 
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.settings.KeyBinding;
+import net.minecraft.network.NetworkManager;
 import net.minecraft.util.ChatComponentText;
 import net.minecraftforge.common.MinecraftForge;
 
@@ -75,15 +76,13 @@ public class ClientProxy extends CommonProxy {
     }
 
     @Override
-    public void onCapeData(UUID playerId, byte[] pngBytes) {
-        Minecraft.getMinecraft()
-            .func_152344_a(() -> capeManager.setCape(playerId, pngBytes));
+    public void onCapeData(NetworkManager source, UUID playerId, byte[] pngBytes) {
+        capeManager.queueCape(source, playerId, pngBytes);
     }
 
     @Override
-    public void onCapeRemoved(UUID playerId) {
-        Minecraft.getMinecraft()
-            .func_152344_a(() -> capeManager.removeCape(playerId));
+    public void onCapeRemoved(NetworkManager source, UUID playerId) {
+        capeManager.queueRemoval(source, playerId);
     }
 
     @Override
