@@ -5,10 +5,15 @@ import java.util.Arrays;
 import java.util.UUID;
 
 import net.minecraft.entity.player.EntityPlayerMP;
+import net.minecraft.network.NetworkManager;
+import net.minecraft.server.MinecraftServer;
 
 import com.enn3developer.ncapes.NCapes;
 import com.enn3developer.ncapes.server.CapeServerEvents;
 
+import cpw.mods.fml.common.FMLCommonHandler;
+import cpw.mods.fml.common.eventhandler.SubscribeEvent;
+import cpw.mods.fml.common.network.FMLNetworkEvent;
 import cpw.mods.fml.common.network.NetworkRegistry;
 import cpw.mods.fml.common.network.simpleimpl.IMessage;
 import cpw.mods.fml.common.network.simpleimpl.IMessageHandler;
@@ -16,6 +21,7 @@ import cpw.mods.fml.common.network.simpleimpl.MessageContext;
 import cpw.mods.fml.common.network.simpleimpl.SimpleNetworkWrapper;
 import cpw.mods.fml.relauncher.Side;
 import io.netty.buffer.ByteBuf;
+import io.netty.util.AttributeKey;
 
 /** Packet protocol for client uploads and server-owned cape distribution. */
 public final class CapeNetwork {
@@ -23,6 +29,7 @@ public final class CapeNetwork {
     // C17PacketCustomPayload rejects payloads at 32767 bytes, including our discriminator and framing.
     public static final int MAX_CAPE_BYTES = 24 * 1024;
 
+    private static final AttributeKey<Boolean> REMOTE_CHANNEL = new AttributeKey<>("ncapes:remoteChannel");
     private static SimpleNetworkWrapper channel;
 
     private CapeNetwork() {}
@@ -38,6 +45,9 @@ public final class CapeNetwork {
         created.registerMessage(CapeDataHandler.class, CapeDataPacket.class, 2, Side.CLIENT);
         created.registerMessage(CapeRemovedHandler.class, CapeRemovedPacket.class, 3, Side.CLIENT);
         created.registerMessage(UploadResultHandler.class, UploadResultPacket.class, 4, Side.CLIENT);
+        FMLCommonHandler.instance()
+            .bus()
+            .register(new PeerRegistrationHandler());
         channel = created;
     }
 
@@ -50,33 +60,95 @@ public final class CapeNetwork {
         if (pngBytes == null || pngBytes.length == 0 || pngBytes.length > MAX_CAPE_BYTES) {
             throw new IllegalArgumentException("Cape PNG must be at most " + MAX_CAPE_BYTES + " bytes");
         }
+        if (!isServerAvailable()) {
+            throw new IllegalStateException("This server does not support NCapes");
+        }
         init();
         channel.sendToServer(new UploadPacket(Arrays.copyOf(pngBytes, pngBytes.length)));
     }
 
     public static void clear() {
+        if (!isServerAvailable()) {
+            throw new IllegalStateException("This server does not support NCapes");
+        }
         init();
         channel.sendToServer(new ClearPacket());
     }
 
+    /** Whether the current connection's server registered the NCapes packet channel. */
+    public static boolean isServerAvailable() {
+        NetworkManager manager = FMLCommonHandler.instance()
+            .getClientToServerNetworkManager();
+        return hasRemoteChannel(manager);
+    }
+
+    /** Whether this player can receive NCapes packets. */
+    public static boolean supports(EntityPlayerMP player) {
+        return player != null && player.playerNetServerHandler != null
+            && hasRemoteChannel(player.playerNetServerHandler.netManager);
+    }
+
+    private static boolean hasRemoteChannel(NetworkManager manager) {
+        return manager != null && manager.isChannelOpen()
+            && Boolean.TRUE.equals(
+                manager.channel()
+                    .attr(REMOTE_CHANNEL)
+                    .get());
+    }
+
     public static void sendCapeTo(EntityPlayerMP recipient, UUID playerId, byte[] pngBytes) {
-        channel.sendTo(new CapeDataPacket(playerId, pngBytes), recipient);
+        if (supports(recipient)) {
+            channel.sendTo(new CapeDataPacket(playerId, pngBytes), recipient);
+        }
     }
 
     public static void broadcastCape(UUID playerId, byte[] pngBytes) {
-        channel.sendToAll(new CapeDataPacket(playerId, pngBytes));
+        MinecraftServer server = MinecraftServer.getServer();
+        if (server != null) {
+            for (EntityPlayerMP player : server.getConfigurationManager().playerEntityList) {
+                sendCapeTo(player, playerId, pngBytes);
+            }
+        }
     }
 
     public static void broadcastCapeRemoved(UUID playerId) {
-        channel.sendToAll(new CapeRemovedPacket(playerId));
+        MinecraftServer server = MinecraftServer.getServer();
+        if (server != null) {
+            for (EntityPlayerMP player : server.getConfigurationManager().playerEntityList) {
+                sendCapeRemovedTo(player, playerId);
+            }
+        }
     }
 
     public static void sendCapeRemovedTo(EntityPlayerMP recipient, UUID playerId) {
-        channel.sendTo(new CapeRemovedPacket(playerId), recipient);
+        if (supports(recipient)) {
+            channel.sendTo(new CapeRemovedPacket(playerId), recipient);
+        }
     }
 
     public static void sendUploadResult(EntityPlayerMP recipient, boolean success, String message) {
-        channel.sendTo(new UploadResultPacket(success, message), recipient);
+        if (supports(recipient)) {
+            channel.sendTo(new UploadResultPacket(success, message), recipient);
+        }
+    }
+
+    public static final class PeerRegistrationHandler {
+
+        @SubscribeEvent
+        public void onChannelRegistration(FMLNetworkEvent.CustomPacketRegistrationEvent<?> event) {
+            if (!event.registrations.contains(NCapes.MODID) || event.manager == null) {
+                return;
+            }
+            if ("REGISTER".equals(event.operation)) {
+                event.manager.channel()
+                    .attr(REMOTE_CHANNEL)
+                    .set(true);
+            } else if ("UNREGISTER".equals(event.operation)) {
+                event.manager.channel()
+                    .attr(REMOTE_CHANNEL)
+                    .set(false);
+            }
+        }
     }
 
     private static void writePlayerId(ByteBuf buffer, UUID playerId) {
@@ -231,7 +303,7 @@ public final class CapeNetwork {
         public IMessage onMessage(UploadPacket packet, MessageContext context) {
             EntityPlayerMP sender = context.getServerHandler().playerEntity;
             if (sender != null) {
-                CapeServerEvents.handleUpload(sender, packet.pngBytes);
+                CapeServerEvents.enqueueUpload(sender, packet.pngBytes);
             }
             return null;
         }
@@ -243,7 +315,7 @@ public final class CapeNetwork {
         public IMessage onMessage(ClearPacket packet, MessageContext context) {
             EntityPlayerMP sender = context.getServerHandler().playerEntity;
             if (sender != null) {
-                CapeServerEvents.handleClear(sender);
+                CapeServerEvents.enqueueClear(sender);
             }
             return null;
         }

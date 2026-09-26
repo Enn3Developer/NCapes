@@ -6,6 +6,7 @@ import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 import net.minecraft.entity.player.EntityPlayerMP;
 import net.minecraft.server.MinecraftServer;
@@ -17,6 +18,7 @@ import com.enn3developer.ncapes.network.CapeNetwork;
 import cpw.mods.fml.common.FMLCommonHandler;
 import cpw.mods.fml.common.eventhandler.SubscribeEvent;
 import cpw.mods.fml.common.gameevent.PlayerEvent;
+import cpw.mods.fml.common.gameevent.TickEvent;
 
 /** Handles server ownership, saved capes, and the online player roster. */
 public final class CapeServerEvents {
@@ -25,6 +27,8 @@ public final class CapeServerEvents {
     private static final long ACTION_INTERVAL_NANOS = 3_000_000_000L;
     private static final Map<UUID, Long> LAST_ACTION = new HashMap<>();
     private static final Set<UUID> WARNED_DURING_INTERVAL = new HashSet<>();
+    // Keep at most one pending request per connection, even if a client floods upload packets.
+    private static final Map<EntityPlayerMP, Runnable> PENDING_ACTIONS = new ConcurrentHashMap<>();
     private static boolean registered;
 
     private CapeServerEvents() {}
@@ -35,6 +39,27 @@ public final class CapeServerEvents {
                 .bus()
                 .register(INSTANCE);
             registered = true;
+        }
+    }
+
+    public static void enqueueUpload(EntityPlayerMP sender, byte[] pngBytes) {
+        PENDING_ACTIONS.putIfAbsent(sender, () -> handleUpload(sender, pngBytes));
+    }
+
+    public static void enqueueClear(EntityPlayerMP sender) {
+        PENDING_ACTIONS.putIfAbsent(sender, () -> handleClear(sender));
+    }
+
+    @SubscribeEvent
+    public void onServerTick(TickEvent.ServerTickEvent event) {
+        if (event.phase != TickEvent.Phase.START) {
+            return;
+        }
+        for (Map.Entry<EntityPlayerMP, Runnable> pending : PENDING_ACTIONS.entrySet()) {
+            if (PENDING_ACTIONS.remove(pending.getKey(), pending.getValue())) {
+                pending.getValue()
+                    .run();
+            }
         }
     }
 
@@ -97,17 +122,20 @@ public final class CapeServerEvents {
             return;
         }
 
+        boolean joinerSupportsCapes = CapeNetwork.supports(joiner);
         byte[] joiningCape = readCape(joiner.getUniqueID());
         for (EntityPlayerMP online : server.getConfigurationManager().playerEntityList) {
             if (online == joiner) {
-                if (joiningCape != null) {
+                if (joinerSupportsCapes && joiningCape != null) {
                     CapeNetwork.sendCapeTo(joiner, joiner.getUniqueID(), joiningCape);
                 }
                 continue;
             }
-            byte[] existingCape = readCape(online.getUniqueID());
-            if (existingCape != null) {
-                CapeNetwork.sendCapeTo(joiner, online.getUniqueID(), existingCape);
+            if (joinerSupportsCapes) {
+                byte[] existingCape = readCape(online.getUniqueID());
+                if (existingCape != null) {
+                    CapeNetwork.sendCapeTo(joiner, online.getUniqueID(), existingCape);
+                }
             }
             if (joiningCape != null) {
                 CapeNetwork.sendCapeTo(online, joiner.getUniqueID(), joiningCape);
@@ -121,6 +149,7 @@ public final class CapeServerEvents {
             return;
         }
         EntityPlayerMP leaving = (EntityPlayerMP) event.player;
+        PENDING_ACTIONS.remove(leaving);
         LAST_ACTION.remove(leaving.getUniqueID());
         WARNED_DURING_INTERVAL.remove(leaving.getUniqueID());
         MinecraftServer server = MinecraftServer.getServer();

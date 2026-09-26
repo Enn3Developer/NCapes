@@ -32,6 +32,10 @@ public class ClientCapeManager {
     private final Queue<ResourceLocation> availableLocations = new ArrayDeque<>();
     private int nextLocation;
 
+    public boolean hasCape(UUID playerId) {
+        return capes.containsKey(playerId);
+    }
+
     public void setCape(UUID playerId, byte[] pngBytes) {
         if (pngBytes == null || pngBytes.length > CapeNetwork.MAX_CAPE_BYTES) {
             NCapes.LOG.warn("Rejected an oversized cape for {}", playerId);
