@@ -9,6 +9,26 @@ permissions:
   contents: write
 
 jobs:
+  verify:
+    uses: GTNewHorizons/GTNH-Actions-Workflows/.github/workflows/build-and-test.yml@master
+
   release-tags:
+    needs: verify
     uses: GTNewHorizons/GTNH-Actions-Workflows/.github/workflows/release-tags.yml@master
-    secrets: inherit
+    secrets:
+      MAVEN_USER: ${{ secrets.MAVEN_USER }}
+      MAVEN_PASSWORD: ${{ secrets.MAVEN_PASSWORD }}
+      CURSEFORGE_TOKEN: ${{ secrets.CURSEFORGE_TOKEN }}
+      MODRINTH_TOKEN: ${{ secrets.MODRINTH_TOKEN }}
+
+  verify-release:
+    needs: release-tags
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check GitHub release and main jar
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json isDraft,assets |
+            jq -e --arg jar "ncapes-${GITHUB_REF_NAME}.jar" '.isDraft == false and any(.assets[]; .name == $jar)'
