@@ -23,6 +23,7 @@ import cpw.mods.fml.common.event.FMLPostInitializationEvent;
 import cpw.mods.fml.common.event.FMLPreInitializationEvent;
 import cpw.mods.fml.common.eventhandler.SubscribeEvent;
 import cpw.mods.fml.common.gameevent.InputEvent;
+import cpw.mods.fml.common.network.FMLNetworkEvent;
 
 public class ClientProxy extends CommonProxy {
 
@@ -86,14 +87,20 @@ public class ClientProxy extends CommonProxy {
     }
 
     @Override
-    public void onCapeUploadResult(boolean success, String message) {
+    public void onCapeUploadResult(long requestId, boolean success, String message) {
         Minecraft.getMinecraft()
             .func_152344_a(() -> {
-                CapeUploadScreen.setUploadResult(success, message);
-                if (Minecraft.getMinecraft().thePlayer != null) {
+                if (CapeUploadScreen.setUploadResult(requestId, success, message)
+                    && Minecraft.getMinecraft().thePlayer != null) {
                     Minecraft.getMinecraft().thePlayer.addChatMessage(new ChatComponentText("[NCapes] " + message));
                 }
             });
+    }
+
+    @SubscribeEvent
+    public void onDisconnect(FMLNetworkEvent.ClientDisconnectionFromServerEvent event) {
+        Minecraft.getMinecraft()
+            .func_152344_a(CapeUploadScreen::clearRequestTracking);
     }
 
     public boolean hasOwnCape() {

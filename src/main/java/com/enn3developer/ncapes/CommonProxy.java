@@ -24,5 +24,5 @@ public class CommonProxy {
 
     public void onCapeRemoved(UUID playerId) {}
 
-    public void onCapeUploadResult(boolean success, String message) {}
+    public void onCapeUploadResult(long requestId, boolean success, String message) {}
 }

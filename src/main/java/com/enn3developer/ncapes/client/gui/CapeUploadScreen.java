@@ -43,9 +43,11 @@ public final class CapeUploadScreen {
 
     private static CapeUploadScreen active;
     private static long lastRequestNanos;
+    private static long latestRequestId;
     private static String lastDirectory;
 
     private boolean busy;
+    private long pendingRequestId;
     private boolean dropEnabled;
     private String status = "Choose a PNG to upload your cape.";
     private volatile FileDialog fileDialog;
@@ -58,11 +60,27 @@ public final class CapeUploadScreen {
         ClientGUI.open(uploadScreen.createScreen());
     }
 
-    public static void setUploadResult(boolean success, String message) {
+    public static boolean setUploadResult(long requestId, boolean success, String message) {
+        if (requestId <= 0 || requestId != latestRequestId) {
+            return false;
+        }
+        latestRequestId = 0;
         CapeUploadScreen uploadScreen = active;
-        if (uploadScreen != null) {
+        if (uploadScreen != null && uploadScreen.pendingRequestId == requestId) {
+            uploadScreen.pendingRequestId = 0;
             uploadScreen.busy = false;
             uploadScreen.status = (success ? "Done: " : "Failed: ") + message;
+        }
+        return true;
+    }
+
+    public static void clearRequestTracking() {
+        latestRequestId = 0;
+        lastRequestNanos = 0;
+        CapeUploadScreen uploadScreen = active;
+        if (uploadScreen != null && uploadScreen.pendingRequestId != 0) {
+            uploadScreen.pendingRequestId = 0;
+            uploadScreen.busy = false;
         }
     }
 
@@ -245,12 +263,18 @@ public final class CapeUploadScreen {
                     if (failure != null) {
                         status = failure;
                     } else if (canSend()) {
+                        long previousRequestId = latestRequestId;
                         try {
-                            CapeNetwork.upload(checkedBytes);
+                            long requestId = CapeNetwork.nextRequestId();
+                            pendingRequestId = requestId;
+                            latestRequestId = requestId;
+                            CapeNetwork.upload(requestId, checkedBytes);
                             lastRequestNanos = System.nanoTime();
                             busy = true;
                             status = "Uploading cape...";
                         } catch (RuntimeException e) {
+                            pendingRequestId = 0;
+                            latestRequestId = previousRequestId;
                             status = "Could not send the cape to this server.";
                             NCapes.LOG.warn("Could not send cape upload", e);
                         }
@@ -289,12 +313,18 @@ public final class CapeUploadScreen {
             status = "You do not have a cape to remove.";
             return;
         }
+        long previousRequestId = latestRequestId;
         try {
-            CapeNetwork.clear();
+            long requestId = CapeNetwork.nextRequestId();
+            pendingRequestId = requestId;
+            latestRequestId = requestId;
+            CapeNetwork.clear(requestId);
             lastRequestNanos = System.nanoTime();
             busy = true;
             status = "Removing cape...";
         } catch (RuntimeException e) {
+            pendingRequestId = 0;
+            latestRequestId = previousRequestId;
             status = "Could not contact this server.";
             NCapes.LOG.warn("Could not send cape removal", e);
         }

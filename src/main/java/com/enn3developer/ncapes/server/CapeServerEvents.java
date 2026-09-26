@@ -2,9 +2,8 @@ package com.enn3developer.ncapes.server;
 
 import java.io.IOException;
 import java.util.HashMap;
-import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.Map;
-import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -26,9 +25,10 @@ public final class CapeServerEvents {
     private static final CapeServerEvents INSTANCE = new CapeServerEvents();
     private static final long ACTION_INTERVAL_NANOS = 3_000_000_000L;
     private static final Map<UUID, Long> LAST_ACTION = new HashMap<>();
-    private static final Set<UUID> WARNED_DURING_INTERVAL = new HashSet<>();
-    // Keep at most one pending request per connection, even if a client floods upload packets.
+    // The newest request replaces an older one that the server has not started yet.
     private static final Map<EntityPlayerMP, Runnable> PENDING_ACTIONS = new ConcurrentHashMap<>();
+    // Includes null entries for players without a valid saved cape. Only online players are retained.
+    private static final Map<EntityPlayerMP, byte[]> ONLINE_CAPES = new IdentityHashMap<>();
     private static boolean registered;
 
     private CapeServerEvents() {}
@@ -42,12 +42,18 @@ public final class CapeServerEvents {
         }
     }
 
-    public static void enqueueUpload(EntityPlayerMP sender, byte[] pngBytes) {
-        PENDING_ACTIONS.putIfAbsent(sender, () -> handleUpload(sender, pngBytes));
+    public static void reset() {
+        PENDING_ACTIONS.clear();
+        ONLINE_CAPES.clear();
+        LAST_ACTION.clear();
     }
 
-    public static void enqueueClear(EntityPlayerMP sender) {
-        PENDING_ACTIONS.putIfAbsent(sender, () -> handleClear(sender));
+    public static void enqueueUpload(EntityPlayerMP sender, long requestId, byte[] pngBytes) {
+        PENDING_ACTIONS.put(sender, () -> handleUpload(sender, requestId, pngBytes));
+    }
+
+    public static void enqueueClear(EntityPlayerMP sender, long requestId) {
+        PENDING_ACTIONS.put(sender, () -> handleClear(sender, requestId));
     }
 
     @SubscribeEvent
@@ -63,15 +69,15 @@ public final class CapeServerEvents {
         }
     }
 
-    public static void handleUpload(EntityPlayerMP sender, byte[] pngBytes) {
+    public static void handleUpload(EntityPlayerMP sender, long requestId, byte[] pngBytes) {
         if (!isConnected(sender)) {
             return;
         }
-        if (!allowAction(sender)) {
+        if (!allowAction(sender, requestId)) {
             return;
         }
         if (pngBytes == null) {
-            CapeNetwork.sendUploadResult(sender, false, "Cape upload exceeded the packet limit");
+            CapeNetwork.sendUploadResult(sender, requestId, false, "Cape upload exceeded the packet limit");
             return;
         }
 
@@ -79,35 +85,37 @@ public final class CapeServerEvents {
             CapeImageValidator.decode(pngBytes);
         } catch (IOException e) {
             String message = e.getMessage() == null ? "Cape PNG could not be decoded" : e.getMessage();
-            CapeNetwork.sendUploadResult(sender, false, message);
+            CapeNetwork.sendUploadResult(sender, requestId, false, message);
             return;
         }
 
         try {
             CapeStorage.save(sender.getUniqueID(), pngBytes);
+            ONLINE_CAPES.put(sender, pngBytes);
             CapeNetwork.broadcastCape(sender.getUniqueID(), pngBytes);
-            CapeNetwork.sendUploadResult(sender, true, "Cape uploaded");
+            CapeNetwork.sendUploadResult(sender, requestId, true, "Cape uploaded");
         } catch (IOException e) {
             NCapes.LOG.warn("Could not save cape for {}", sender.getCommandSenderName(), e);
-            CapeNetwork.sendUploadResult(sender, false, "Server could not save the cape");
+            CapeNetwork.sendUploadResult(sender, requestId, false, "Server could not save the cape");
         }
     }
 
-    public static void handleClear(EntityPlayerMP sender) {
+    public static void handleClear(EntityPlayerMP sender, long requestId) {
         if (!isConnected(sender)) {
             return;
         }
-        if (!allowAction(sender)) {
+        if (!allowAction(sender, requestId)) {
             return;
         }
 
         try {
             CapeStorage.remove(sender.getUniqueID());
+            ONLINE_CAPES.put(sender, null);
             CapeNetwork.broadcastCapeRemoved(sender.getUniqueID());
-            CapeNetwork.sendUploadResult(sender, true, "Cape removed");
+            CapeNetwork.sendUploadResult(sender, requestId, true, "Cape removed");
         } catch (IOException e) {
             NCapes.LOG.warn("Could not remove cape for {}", sender.getCommandSenderName(), e);
-            CapeNetwork.sendUploadResult(sender, false, "Server could not remove the cape");
+            CapeNetwork.sendUploadResult(sender, requestId, false, "Server could not remove the cape");
         }
     }
 
@@ -123,7 +131,7 @@ public final class CapeServerEvents {
         }
 
         boolean joinerSupportsCapes = CapeNetwork.supports(joiner);
-        byte[] joiningCape = readCape(joiner.getUniqueID());
+        byte[] joiningCape = cachedCape(joiner);
         for (EntityPlayerMP online : server.getConfigurationManager().playerEntityList) {
             if (online == joiner) {
                 if (joinerSupportsCapes && joiningCape != null) {
@@ -132,7 +140,7 @@ public final class CapeServerEvents {
                 continue;
             }
             if (joinerSupportsCapes) {
-                byte[] existingCape = readCape(online.getUniqueID());
+                byte[] existingCape = cachedCape(online);
                 if (existingCape != null) {
                     CapeNetwork.sendCapeTo(joiner, online.getUniqueID(), existingCape);
                 }
@@ -150,8 +158,8 @@ public final class CapeServerEvents {
         }
         EntityPlayerMP leaving = (EntityPlayerMP) event.player;
         PENDING_ACTIONS.remove(leaving);
+        ONLINE_CAPES.remove(leaving);
         LAST_ACTION.remove(leaving.getUniqueID());
-        WARNED_DURING_INTERVAL.remove(leaving.getUniqueID());
         MinecraftServer server = MinecraftServer.getServer();
         if (server == null) {
             return;
@@ -161,6 +169,13 @@ public final class CapeServerEvents {
                 CapeNetwork.sendCapeRemovedTo(online, leaving.getUniqueID());
             }
         }
+    }
+
+    private static byte[] cachedCape(EntityPlayerMP player) {
+        if (!ONLINE_CAPES.containsKey(player)) {
+            ONLINE_CAPES.put(player, readCape(player.getUniqueID()));
+        }
+        return ONLINE_CAPES.get(player);
     }
 
     private static byte[] readCape(UUID playerId) {
@@ -178,18 +193,15 @@ public final class CapeServerEvents {
             && player.playerNetServerHandler.netManager.isChannelOpen();
     }
 
-    private static boolean allowAction(EntityPlayerMP sender) {
+    private static boolean allowAction(EntityPlayerMP sender, long requestId) {
         UUID playerId = sender.getUniqueID();
         long now = System.nanoTime();
         Long previous = LAST_ACTION.get(playerId);
         if (previous != null && now - previous < ACTION_INTERVAL_NANOS) {
-            if (WARNED_DURING_INTERVAL.add(playerId)) {
-                CapeNetwork.sendUploadResult(sender, false, "Wait 3 seconds before changing your cape again");
-            }
+            CapeNetwork.sendUploadResult(sender, requestId, false, "Wait 3 seconds before changing your cape again");
             return false;
         }
         LAST_ACTION.put(playerId, now);
-        WARNED_DURING_INTERVAL.remove(playerId);
         return true;
     }
 }

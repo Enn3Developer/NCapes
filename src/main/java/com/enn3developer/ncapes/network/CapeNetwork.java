@@ -3,6 +3,7 @@ package com.enn3developer.ncapes.network;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicLong;
 
 import net.minecraft.entity.player.EntityPlayerMP;
 import net.minecraft.network.NetworkManager;
@@ -30,6 +31,7 @@ public final class CapeNetwork {
     public static final int MAX_CAPE_BYTES = 24 * 1024;
 
     private static final AttributeKey<Boolean> REMOTE_CHANNEL = new AttributeKey<>("ncapes:remoteChannel");
+    private static final AtomicLong REQUEST_IDS = new AtomicLong();
     private static SimpleNetworkWrapper channel;
 
     private CapeNetwork() {}
@@ -56,7 +58,18 @@ public final class CapeNetwork {
         init();
     }
 
-    public static void upload(byte[] pngBytes) {
+    public static long nextRequestId() {
+        long requestId = REQUEST_IDS.incrementAndGet();
+        if (requestId <= 0) {
+            throw new IllegalStateException("Cape request IDs are exhausted");
+        }
+        return requestId;
+    }
+
+    public static void upload(long requestId, byte[] pngBytes) {
+        if (requestId <= 0) {
+            throw new IllegalArgumentException("Cape request ID must be positive");
+        }
         if (pngBytes == null || pngBytes.length == 0 || pngBytes.length > MAX_CAPE_BYTES) {
             throw new IllegalArgumentException("Cape PNG must be at most " + MAX_CAPE_BYTES + " bytes");
         }
@@ -64,15 +77,18 @@ public final class CapeNetwork {
             throw new IllegalStateException("This server does not support NCapes");
         }
         init();
-        channel.sendToServer(new UploadPacket(Arrays.copyOf(pngBytes, pngBytes.length)));
+        channel.sendToServer(new UploadPacket(requestId, Arrays.copyOf(pngBytes, pngBytes.length)));
     }
 
-    public static void clear() {
+    public static void clear(long requestId) {
+        if (requestId <= 0) {
+            throw new IllegalArgumentException("Cape request ID must be positive");
+        }
         if (!isServerAvailable()) {
             throw new IllegalStateException("This server does not support NCapes");
         }
         init();
-        channel.sendToServer(new ClearPacket());
+        channel.sendToServer(new ClearPacket(requestId));
     }
 
     /** Whether the current connection's server registered the NCapes packet channel. */
@@ -126,9 +142,9 @@ public final class CapeNetwork {
         }
     }
 
-    public static void sendUploadResult(EntityPlayerMP recipient, boolean success, String message) {
+    public static void sendUploadResult(EntityPlayerMP recipient, long requestId, boolean success, String message) {
         if (supports(recipient)) {
-            channel.sendTo(new UploadResultPacket(success, message), recipient);
+            channel.sendTo(new UploadResultPacket(requestId, success, message), recipient);
         }
     }
 
@@ -183,34 +199,53 @@ public final class CapeNetwork {
 
     public static final class UploadPacket implements IMessage {
 
+        private long requestId;
         private byte[] pngBytes;
 
         public UploadPacket() {}
 
-        private UploadPacket(byte[] pngBytes) {
+        private UploadPacket(long requestId, byte[] pngBytes) {
+            this.requestId = requestId;
             this.pngBytes = pngBytes;
         }
 
         @Override
         public void fromBytes(ByteBuf buffer) {
+            if (buffer.readableBytes() < 8) {
+                return;
+            }
+            requestId = buffer.readLong();
             pngBytes = readCapeBytes(buffer);
         }
 
         @Override
         public void toBytes(ByteBuf buffer) {
+            buffer.writeLong(requestId);
             writeCapeBytes(buffer, pngBytes);
         }
     }
 
     public static final class ClearPacket implements IMessage {
 
+        private long requestId;
+
         public ClearPacket() {}
 
-        @Override
-        public void fromBytes(ByteBuf buffer) {}
+        private ClearPacket(long requestId) {
+            this.requestId = requestId;
+        }
 
         @Override
-        public void toBytes(ByteBuf buffer) {}
+        public void fromBytes(ByteBuf buffer) {
+            if (buffer.readableBytes() == 8) {
+                requestId = buffer.readLong();
+            }
+        }
+
+        @Override
+        public void toBytes(ByteBuf buffer) {
+            buffer.writeLong(requestId);
+        }
     }
 
     public static final class CapeDataPacket implements IMessage {
@@ -261,21 +296,24 @@ public final class CapeNetwork {
 
     public static final class UploadResultPacket implements IMessage {
 
+        private long requestId;
         private boolean success;
         private String message;
 
         public UploadResultPacket() {}
 
-        private UploadResultPacket(boolean success, String message) {
+        private UploadResultPacket(long requestId, boolean success, String message) {
+            this.requestId = requestId;
             this.success = success;
             this.message = message;
         }
 
         @Override
         public void fromBytes(ByteBuf buffer) {
-            if (buffer.readableBytes() < 2) {
+            if (buffer.readableBytes() < 10) {
                 return;
             }
+            requestId = buffer.readLong();
             success = buffer.readBoolean();
             int length = buffer.readUnsignedByte();
             if (length > 0 && length == buffer.readableBytes()) {
@@ -291,6 +329,7 @@ public final class CapeNetwork {
             if (bytes.length > 255) {
                 throw new IllegalArgumentException("Upload result is too long");
             }
+            buffer.writeLong(requestId);
             buffer.writeBoolean(success);
             buffer.writeByte(bytes.length);
             buffer.writeBytes(bytes);
@@ -302,8 +341,8 @@ public final class CapeNetwork {
         @Override
         public IMessage onMessage(UploadPacket packet, MessageContext context) {
             EntityPlayerMP sender = context.getServerHandler().playerEntity;
-            if (sender != null) {
-                CapeServerEvents.enqueueUpload(sender, packet.pngBytes);
+            if (sender != null && packet.requestId > 0) {
+                CapeServerEvents.enqueueUpload(sender, packet.requestId, packet.pngBytes);
             }
             return null;
         }
@@ -314,8 +353,8 @@ public final class CapeNetwork {
         @Override
         public IMessage onMessage(ClearPacket packet, MessageContext context) {
             EntityPlayerMP sender = context.getServerHandler().playerEntity;
-            if (sender != null) {
-                CapeServerEvents.enqueueClear(sender);
+            if (sender != null && packet.requestId > 0) {
+                CapeServerEvents.enqueueClear(sender, packet.requestId);
             }
             return null;
         }
@@ -347,8 +386,8 @@ public final class CapeNetwork {
 
         @Override
         public IMessage onMessage(UploadResultPacket packet, MessageContext context) {
-            if (packet.message != null) {
-                NCapes.proxy.onCapeUploadResult(packet.success, packet.message);
+            if (packet.requestId > 0 && packet.message != null) {
+                NCapes.proxy.onCapeUploadResult(packet.requestId, packet.success, packet.message);
             }
             return null;
         }
